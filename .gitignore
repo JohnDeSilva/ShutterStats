@@ -3,3 +3,9 @@
 Cargo.lock
 *.app
 .DS_Store
+
+# Real EXIF fixtures are camera captures, not synthesised, so they are not
+# committed (licensing + repository size). Tests that use them skip when the
+# directory is absent or empty. Populate it with your own RAW + JPEG samples to
+# exercise those paths; see README.md "Testing".
+/test_files/
