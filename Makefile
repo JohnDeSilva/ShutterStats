@@ -1,4 +1,6 @@
-.PHONY: build run test test-lib test-ui clean install-deps fmt clippy check bundle
+.PHONY: all build build-debug run run-debug run-debug-log run-scan-log run-exif-log \
+        run-ui-log test test-lib test-ui test-verbose clean install-deps fmt clippy check \
+        bundle build-all dev-check release help
 
 # Default target
 all: build
@@ -16,8 +18,11 @@ run: build
 	./target/release/camera_stats
 
 # Run debug build
+# RUST_LOG is set here because a debug build without it silently swallows every
+# diagnostic, which is the single most common "why is nothing logging" question.
+# Writable so a stale file cannot abort the run.
 run-debug: build-debug
-	./target/debug/camera_stats
+	RUST_LOG=info,camera_stats=debug,scan=debug,exif=debug,ui=debug ./target/debug/camera_stats
 
 # Run all tests
 test:
@@ -110,7 +115,7 @@ help:
 	@echo "  build         - Build release binary"
 	@echo "  build-debug   - Build debug binary"
 	@echo "  run           - Build and run release"
-	@echo "  run-debug     - Build and run debug"
+	@echo "  run-debug     - Build and run debug (RUST_LOG preset for scan/exif/ui)"
 	@echo "  test          - Run all tests"
 	@echo "  test-lib      - Run library tests only"
 	@echo "  test-verbose  - Run tests with output"
