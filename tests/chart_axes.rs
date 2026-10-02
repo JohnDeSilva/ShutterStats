@@ -1,21 +1,28 @@
 //! Verifies chart plot behaviour that cannot be checked with a pure function:
-//! that a rendered histogram's y axis starts at zero, and that the plot is not
-//! interactive.
+//! that bounds pinned with `set_plot_bounds` survive into the rendered plot, and
+//! that the plot is not interactive.
 //!
 //! `egui_plot` computes axis bounds internally, so the only way to confirm the
-//! axis really cannot go negative is to render a plot and read back the bounds
-//! it settled on.
+//! app's pinned range really takes effect is to render a plot and read back the
+//! bounds it settled on.
+//!
+//! The range arithmetic itself lives in the binary crate (`ui::charts`), which an
+//! integration test cannot import, so it is unit tested there against the real
+//! `TOP_BUFFER` constant. This file deliberately does *not* copy that
+//! arithmetic: a copied formula would keep passing even if the app's constant
+//! changed. Instead it pins a distinctive sentinel range and checks the rendered
+//! axis matches it exactly, which is what proves the app's own values are used.
 
 use std::cell::Cell;
 
-use eframe::egui::{self, Vec2};
-use egui_plot::{Bar, BarChart, Plot};
+use eframe::egui;
+use egui_plot::{Bar, BarChart, Plot, PlotBounds};
 
-/// Margin mirroring `charts::MARGIN_FRACTION`: x padded, y not.
-const MARGIN_FRACTION: Vec2 = Vec2::new(0.05, 0.0);
-
-/// Render a histogram and return the y range of the final plot bounds.
-fn render_histogram(counts: &[(f64, f64)], margin: Vec2) -> (f64, f64) {
+/// Render a histogram and return the final `(y_min, y_max)`.
+///
+/// `pinned` is `Some` to force bounds the way the app does, or `None` to leave
+/// them to `egui_plot`'s auto-fit.
+fn render_with(counts: &[(f64, f64)], pinned: Option<PlotBounds>) -> (f64, f64) {
     // `Plot::show` returns a `PlotResponse` whose `transform` holds the bounds
     // as they were finally computed. Reading `plot_ui.plot_bounds()` inside the
     // closure would return stale values, because `prepare()` runs afterwards.
@@ -33,9 +40,11 @@ fn render_histogram(counts: &[(f64, f64)], margin: Vec2) -> (f64, f64) {
             .allow_drag(false)
             .allow_scroll(false)
             .allow_boxed_zoom(false)
-            .set_margin_fraction(margin)
             .show(ui, |plot_ui| {
                 plot_ui.bar_chart(BarChart::new(bars).width(0.8));
+                if let Some(bounds) = pinned {
+                    plot_ui.set_plot_bounds(bounds);
+                }
             });
 
         let bounds = response.transform.bounds();
@@ -45,74 +54,92 @@ fn render_histogram(counts: &[(f64, f64)], margin: Vec2) -> (f64, f64) {
     result.get()
 }
 
-/// The regression this protects against: `egui_plot` pads auto-bounds by a
-/// fraction on every side. For a histogram whose baseline is 0, that padding
-/// puts the axis minimum below zero, so the plot grows negative tick labels
-/// under data that has no negative values. A zero y margin keeps the baseline
-/// exactly on 0.
-#[test]
-fn y_axis_never_goes_below_zero() {
-    let (min, max) = render_histogram(
-        &[(100.0, 5.0), (200.0, 12.0), (400.0, 3.0)],
-        MARGIN_FRACTION,
-    );
-
-    assert!(
-        min >= 0.0,
-        "y axis started at {min} (max {max}); it must not go below zero"
-    );
-    // Sanity: the data is in range, so the assertion above is not passing just
-    // because the bounds collapsed.
-    assert!(max >= 12.0, "y max {max} should cover the tallest bar (12)");
-}
-
-/// A count is never negative, so no realistic distribution should produce a
-/// negative axis — including a single bar and a tall narrow spike.
-#[test]
-fn y_axis_stays_non_negative_across_shapes() {
-    let cases: Vec<Vec<(f64, f64)>> = vec![
-        vec![(800.0, 1.0)],
-        vec![(100.0, 1.0), (1600.0, 999.0)],
-        vec![(1.0, 7.0), (2.0, 7.0), (3.0, 7.0)],
-        vec![(50.0, 0.0), (60.0, 4.0)],
-    ];
-
-    for counts in cases {
-        let (min, max) = render_histogram(&counts, MARGIN_FRACTION);
-        assert!(
-            min >= 0.0,
-            "y axis went negative: {min} with data {counts:?}"
-        );
-        assert!(max > min, "y axis collapsed for data {counts:?}");
-    }
-}
-
-/// Documents the failure being fixed with actual numbers, so the workaround is
-/// justified by evidence rather than by assumption.
+/// A distinctive y range the app would never auto-fit to.
 ///
-/// If a future `egui_plot` stops padding below zero, this test fails and the
-/// zero-margin workaround in `charts.rs` can be removed.
+/// Used as a probe: if the rendered axis comes back exactly `[0.0, SENTINEL]`
+/// then `set_plot_bounds` is genuinely honoured. Asserting a specific number
+/// rather than a copied formula keeps this file independent of the app's
+/// arithmetic — the buffer maths itself is unit tested in `src/ui/charts.rs`,
+/// where the real constant lives.
+const SENTINEL_MAX: f64 = 4_242.5;
+
+fn sentinel_bounds() -> PlotBounds {
+    PlotBounds::from_min_max([-50.0, 0.0], [450.0, SENTINEL_MAX])
+}
+
+/// `set_plot_bounds` must be honoured exactly, or the app's computed top buffer
+/// and zero baseline would be silently discarded by auto-fit.
 #[test]
-fn default_margin_is_what_caused_negative_ticks() {
+fn pinned_bounds_are_honoured_exactly() {
+    let counts = [(100.0, 5.0), (200.0, 12.0), (400.0, 3.0)];
+    let (min, max) = render_with(&counts, Some(sentinel_bounds()));
+
+    assert_eq!(min, 0.0, "the count axis must start at zero, got {min}");
+    assert_eq!(
+        max, SENTINEL_MAX,
+        "the axis must reach the pinned maximum, leaving the app's top buffer \
+         above the tallest bar"
+    );
+    assert!(
+        max > 12.0,
+        "the tallest bar must not touch the top of the frame"
+    );
+}
+
+/// A pinned minimum at 0 must hold even when the data goes negative, so a
+/// malformed EXIF value cannot drag the axis below the baseline.
+#[test]
+fn a_pinned_zero_minimum_survives_negative_data() {
+    let counts = [(1.0, -50.0), (2.0, -3.0), (3.0, 4.0)];
+    let (min, max) = render_with(&counts, Some(sentinel_bounds()));
+
+    assert_eq!(min, 0.0, "a negative bar pulled the axis to {min}");
+    assert_eq!(max, SENTINEL_MAX);
+}
+
+/// A single bar has zero x span, which must not collapse the transform or
+/// produce an inverted range.
+#[test]
+fn a_single_bar_still_renders() {
+    let counts = [(135.0, 9.0)];
+    let (min, max) = render_with(&counts, Some(sentinel_bounds()));
+
+    assert_eq!(min, 0.0);
+    assert_eq!(max, SENTINEL_MAX);
+}
+
+/// Records why the bounds are pinned rather than auto-fitted.
+///
+/// `egui_plot` pads auto-bounds by 5% on every side, so a histogram whose
+/// baseline is 0 gets a y minimum of about `-0.05 * max`: negative tick labels
+/// under a plot with no negative data. Its y maximum also floats with the data,
+/// so any headroom above the tallest bar would be an accident rather than a
+/// fixed gap.
+///
+/// If a future `egui_plot` fixes this upstream, this test fails and the explicit
+/// bounds in `ui::charts` can be reconsidered.
+#[test]
+fn auto_fitted_bounds_are_why_they_are_pinned() {
     let counts = [(100.0, 5.0), (200.0, 12.0), (400.0, 3.0)];
 
-    // egui_plot's default margin: 5% on both axes.
-    let (default_min, _) = render_histogram(&counts, Vec2::splat(0.05));
-    let (fixed_min, _) = render_histogram(&counts, MARGIN_FRACTION);
+    let (auto_min, _) = render_with(&counts, None);
+    let (pinned_min, pinned_max) = render_with(&counts, Some(sentinel_bounds()));
 
     assert!(
-        default_min < 0.0,
-        "expected the default margin to dip below zero, got {default_min}; \
-         the zero-margin workaround in charts.rs may no longer be needed"
+        auto_min < 0.0,
+        "expected auto-fit to dip below zero, got {auto_min}; \
+         egui_plot may have fixed this, so the pinned bounds in ui/charts.rs \
+         could be revisited"
     );
-    assert!(
-        fixed_min >= 0.0,
-        "the zero-margin plot should sit at 0 or above, got {fixed_min}"
+    assert_eq!(
+        pinned_min, 0.0,
+        "pinned bounds should sit exactly on the baseline, got {pinned_min}"
     );
+    assert_eq!(pinned_max, SENTINEL_MAX);
 }
 
-/// Run `frames` frames in one persistent [`egui::Context`], injecting scroll and
-/// drag events on the given frames, and record the plot bounds from each.
+/// Run 4 frames in one persistent [`egui::Context`], injecting scroll and drag
+/// events on the given frames, and record the plot bounds from each.
 ///
 /// The persistent context is the whole point: `egui_plot` stores pan/zoom in
 /// context memory keyed by plot id, so only a shared context across frames can
@@ -128,11 +155,11 @@ fn bounds_across_frames(locked: bool, drag_frame: usize, scroll_frame: usize) ->
     // The plot's screen rect is only known after the first frame, and egui_plot
     // gates both scroll and drag on the pointer being inside it, so the rect is
     // captured on frame 0 and used to aim the later gestures.
-    let plot_rect = std::cell::Cell::new(egui::Rect::from_min_size(
+    let plot_rect = std::cell::RefCell::new(egui::Rect::from_min_size(
         Pos2::ZERO,
         EVec2::new(800.0, 200.0),
     ));
-    let centre = plot_rect.get().center();
+    let centre = plot_rect.borrow().center();
 
     for frame in 0..4 {
         let mut events = vec![Event::PointerMoved(centre)];
@@ -159,9 +186,10 @@ fn bounds_across_frames(locked: bool, drag_frame: usize, scroll_frame: usize) ->
         if drag_frame.checked_add(1) == Some(frame) {
             // Move while held. This is the frame where the drag takes effect,
             // since `dragged_by` needs a previous and a current position.
-            events.push(Event::PointerMoved(centre + EVec2::new(60.0, 40.0)));
+            let moved = centre + EVec2::new(60.0, 40.0);
+            events.push(Event::PointerMoved(moved));
             events.push(Event::PointerButton {
-                pos: centre + EVec2::new(60.0, 40.0),
+                pos: moved,
                 button: PointerButton::Primary,
                 pressed: false,
                 modifiers: Default::default(),
@@ -181,7 +209,6 @@ fn bounds_across_frames(locked: bool, drag_frame: usize, scroll_frame: usize) ->
             egui::CentralPanel::default().show(ctx, |ui| {
                 let bars: Vec<Bar> = counts.iter().map(|(x, y)| Bar::new(*x, *y)).collect();
                 let mut plot = Plot::new("persistent").height(200.0);
-                plot = plot.set_margin_fraction(MARGIN_FRACTION);
                 if locked {
                     plot = plot
                         .allow_zoom(false)
@@ -192,9 +219,10 @@ fn bounds_across_frames(locked: bool, drag_frame: usize, scroll_frame: usize) ->
                 }
                 let response = plot.show(ui, |plot_ui| {
                     plot_ui.bar_chart(BarChart::new(bars).width(0.8));
+                    plot_ui.set_plot_bounds(PlotBounds::from_min_max([80.0, 0.0], [420.0, 17.0]));
                 });
                 let b = response.transform.bounds();
-                plot_rect.set(response.response.rect);
+                *plot_rect.borrow_mut() = response.response.rect;
                 recorded.borrow_mut().push((b.min()[1], b.max()[1]));
             });
         });
@@ -240,38 +268,18 @@ fn locked_plot_ignores_scroll_and_drag() {
     }
 }
 
-/// Locking must not have broken the zero baseline: the interaction tests above
-/// all use `MARGIN_FRACTION`, so the axis must still start at 0 on every frame.
+/// Locking must not have broken the pinned range: the y axis must still sit at
+/// 0 with the same maximum on every frame, however the user interacts.
 #[test]
-fn locked_plot_still_starts_at_zero_on_every_frame() {
+fn locked_plot_keeps_its_range_on_every_frame() {
     for bounds in bounds_across_frames(true, 2, 1) {
-        assert!(
-            bounds.0 >= 0.0,
-            "locked plot y axis dipped below zero: {bounds:?}"
+        assert_eq!(
+            bounds.0, 0.0,
+            "locked plot y axis should stay at 0, got {bounds:?}"
+        );
+        assert_eq!(
+            bounds.1, 17.0,
+            "locked plot should keep its pinned range, got {bounds:?}"
         );
     }
-}
-
-/// The x axis still gets its margin, so the outermost bars are not flush
-/// against the frame. Clamping the y axis must not have cost the x padding.
-#[test]
-fn x_axis_keeps_its_margin() {
-    let counts = [(100.0, 5.0), (200.0, 12.0)];
-
-    let x_min = Cell::new(f64::NAN);
-    egui::__run_test_ui(|ui| {
-        let bars: Vec<Bar> = counts.iter().map(|(x, y)| Bar::new(*x, *y)).collect();
-        let response = Plot::new("x_margin")
-            .height(200.0)
-            .set_margin_fraction(MARGIN_FRACTION)
-            .show(ui, |plot_ui| plot_ui.bar_chart(BarChart::new(bars)));
-        x_min.set(response.transform.bounds().min()[0]);
-    });
-
-    let first_x = counts[0].0;
-    assert!(
-        x_min.get() < first_x,
-        "x min {} should sit below the first bar at {first_x}",
-        x_min.get()
-    );
 }

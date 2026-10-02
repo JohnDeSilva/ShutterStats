@@ -37,7 +37,7 @@ src/
 └── ui/              # All egui drawing code
     ├── mod.rs
     ├── toolbar.rs      # Folder select, export, settings, status
-    ├── charts.rs       # ISO / aperture / focal charts
+    ├── charts.rs       # ISO / aperture / focal charts (locked, pinned bounds)
     ├── photo_table.rs  # Sortable, filterable photo grid
     └── settings.rs     # Display settings window
 ```
@@ -51,6 +51,12 @@ src/
   `column_group!` macro, naming each `PhotoTableColumns` field as a literal
   identifier. A test asserts the declared groups cover every struct field, so a
   new field cannot be added without either a checkbox or a test failure.
+- Charts are **read-only and explicitly bounded**. `ui/charts.rs` pins both axes
+  with `set_plot_bounds` rather than using `egui_plot`'s auto-fit, because that
+  pads bounds by 5% on every side and puts negative ticks under a count axis.
+  The y range is `0 ..= tallest + TOP_BUFFER`; the range maths is pure and unit
+  tested there, while `tests/chart_axes.rs` renders a real plot to prove
+  `set_plot_bounds` is honoured.
 - Do not reintroduce a 1000-line `main.rs`; add a module instead.
 
 ## Development Workflow

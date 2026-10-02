@@ -7,9 +7,11 @@ Cross-platform desktop app to analyze EXIF data from photos (JPEG + RAW) and sho
 - 📁 Recursive folder scanning
 - 📸 Supports JPEG, CR2/3, NEF, ARW, RAF, RW2, ORF, PEF, SRW, DNG
 - ⚡ Parallel EXIF extraction (Rayon) on a background thread — the UI stays responsive during a scan
-- 📊 Interactive charts: ISO, Aperture, and Focal Length distributions
+- 📊 Charts: ISO, Aperture, and Focal Length distributions
   - Chart style: bars, lines, or points
   - Aperture axis: linear, logarithmic, or snapped to standard f-stops
+  - Read-only and auto-scaling: charts cannot be panned or zoomed, and the y axis
+    always starts at 0 with 5 units of headroom above the tallest bar
 - 🔽 Sortable photo table (click a header to sort, again to reverse)
 - 🔎 Multi-select filters on Aperture, Focal Length, Camera, Lens, and Type — filters combine with AND
 - 📄 CSV export of the loaded photos
