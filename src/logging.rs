@@ -63,3 +63,36 @@ pub fn log_exif_extract(path: &Path, success: bool, err: Option<&anyhow::Error>)
 pub fn log_ui_event(event: &str) {
     info!(target: "ui", "{}", event);
 }
+
+/// Log a display setting the user changed.
+///
+/// Recorded at `debug` so that turning on `RUST_LOG=debug` records a replayable
+/// trace of every setting change, without spamming the default log.
+pub fn log_setting_changed(setting: &str, value: impl std::fmt::Display) {
+    debug!(target: "ui", "Setting changed: {setting} = {value}");
+}
+
+/// Log how many photos survived filtering, and how many were dropped.
+///
+/// This is the first thing to look at when a table "looks empty": it separates
+/// "the filter excluded everything" from "no photos were ever loaded".
+pub fn log_filter_result(shown: usize, total: usize, filters: &str) {
+    info!(target: "ui", "Filter {filters} -> {shown} of {total} photos shown");
+}
+
+/// Log the aggregated statistics for a completed scan.
+///
+/// The distinct-value counts here are the quickest way to confirm that EXIF
+/// extraction actually worked, without opening a single file.
+pub fn log_stats_summary(
+    iso_values: usize,
+    aperture_values: usize,
+    focal_values: usize,
+    cameras: usize,
+    lenses: usize,
+) {
+    info!(
+        target: "scan",
+        "Stats: {iso_values} ISO values, {aperture_values} apertures, {focal_values} focal lengths, {cameras} cameras, {lenses} lenses"
+    );
+}

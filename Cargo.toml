@@ -24,3 +24,6 @@ dirs = "5.0"
 
 [dev-dependencies]
 tempfile = "3.10"
+# Used only by tests to enumerate the serialized field names of
+# PhotoTableColumns, so the Settings UI and the struct cannot drift.
+serde_json = "1.0"
