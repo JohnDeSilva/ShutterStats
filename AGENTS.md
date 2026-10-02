@@ -136,10 +136,13 @@ The `build.sh` script auto-installs Linux deps.
 
 ### New RAW Format
 1. Check `rawler` supports it (uses libraw)
-2. Add extension to `scan_directory` extensions list (both the `extensions`
-   array and the `is_raw` match — both must be updated or files are scanned
-   but treated as JPEG)
-3. Test with real files, and confirm the count in the scan log matches
+2. Add the extension to `PHOTO_EXTENSIONS` in `lib.rs` (lowercase only —
+   matching is case-insensitive) so the file gets scanned, and to
+   `is_raw_extension` so it routes to the RAW extractor instead of the
+   JPEG one
+3. Add it to both tests in the `lib.rs` test module; they cover the two
+   lists separately, so a missing entry shows up as a failure
+4. Test with real files, and confirm the count in the scan log matches
 
 ## Error Handling
 - All fallible operations return `anyhow::Result<T>`

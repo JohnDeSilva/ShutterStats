@@ -330,12 +330,33 @@ pub fn export_csv(photos: &[PhotoMeta], path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn scan_directory(dir: PathBuf, tx: std::sync::mpsc::Sender<Vec<PhotoMeta>>) {
-    let extensions = [
-        "jpg", "jpeg", "JPG", "JPEG", "cr2", "cr3", "CR2", "CR3", "nef", "NEF", "arw", "ARW",
-        "raf", "RAF", "rw2", "RW2", "orf", "ORF", "pef", "PEF", "srw", "SRW", "dng", "DNG",
-    ];
+/// Extensions [`scan_directory`] will pick up, compared case-insensitively.
+///
+/// Keep lowercase only: callers lowercase the extension before matching.
+/// Listing both `"arw"` and `"ARW"` here is what previously made mixed case
+/// like `.Arw` silently unscannable.
+const PHOTO_EXTENSIONS: [&str; 12] = [
+    "jpg", "jpeg", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf", "pef", "srw", "dng",
+];
 
+/// Whether a file extension is one this app can extract metadata from.
+///
+/// Case-insensitive, so a `.ARW` and an `.arw` are both collected. This decides
+/// whether a file is scanned at all; [`is_raw_extension`] then decides which
+/// extractor handles it.
+pub fn is_photo_extension(ext: &str) -> bool {
+    PHOTO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+}
+
+/// Whether an already-lowercased extension needs the RAW extractor.
+fn is_raw_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "cr2" | "cr3" | "nef" | "arw" | "raf" | "rw2" | "orf" | "pef" | "srw" | "dng"
+    )
+}
+
+pub fn scan_directory(dir: PathBuf, tx: std::sync::mpsc::Sender<Vec<PhotoMeta>>) {
     let files: Vec<_> = walkdir::WalkDir::new(&dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -344,8 +365,7 @@ pub fn scan_directory(dir: PathBuf, tx: std::sync::mpsc::Sender<Vec<PhotoMeta>>)
             e.path()
                 .extension()
                 .and_then(|s| s.to_str())
-                .map(|ext| extensions.contains(&ext))
-                .unwrap_or(false)
+                .is_some_and(is_photo_extension)
         })
         .map(|e| e.path().to_path_buf())
         .collect();
@@ -365,14 +385,7 @@ pub fn scan_directory(dir: PathBuf, tx: std::sync::mpsc::Sender<Vec<PhotoMeta>>)
         .par_iter()
         .filter_map(|path| {
             let ext = path.extension()?.to_str()?.to_lowercase();
-            // `ext` is already lowercased above, so upper-case file names are
-            // handled here without spelling out every case variant.
-            let is_raw = matches!(
-                ext.as_str(),
-                "cr2" | "cr3" | "nef" | "arw" | "raf" | "rw2" | "orf" | "pef" | "srw" | "dng"
-            );
-
-            let result = if is_raw {
+            let result = if is_raw_extension(&ext) {
                 extract_raw_exif(path)
             } else {
                 extract_exif(path)
@@ -386,7 +399,7 @@ pub fn scan_directory(dir: PathBuf, tx: std::sync::mpsc::Sender<Vec<PhotoMeta>>)
                 Err(e) => {
                     crate::logging::log_exif_extract(path, false, Some(e));
                     failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if is_raw {
+                    if is_raw_extension(&ext) {
                         failed_raw.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     } else {
                         failed_jpeg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -441,6 +454,58 @@ mod tests {
         img.save_with_format(&path, image::ImageFormat::Jpeg)
             .unwrap();
         path
+    }
+
+    /// A file is only scanned if `is_photo_extension` accepts it, and this is
+    /// the bug it used to hide: the extension list spelled out both `"arw"` and
+    /// `"ARW"` and matched the raw string, so `.ARW` worked by luck while a
+    /// mixed-case `.Arw` was never collected at all.
+    #[test]
+    fn is_photo_extension_accepts_any_case() {
+        for ext in [
+            "jpg", "JPG", "Jpg", "jpeg", "JPEG", "Jpeg", "arw", "ARW", "Arw", "aRw", "nef", "NEF",
+            "NeF", "cr2", "CR2", "cr3", "dng", "DNG", "raf", "rw2", "orf", "pef", "srw",
+        ] {
+            assert!(
+                is_photo_extension(ext),
+                "{ext:?} should be recognised as a photo extension"
+            );
+        }
+    }
+
+    /// Extensions this app cannot read must be rejected rather than scanned and
+    /// then failing to decode. Note `png` and `heic`: both are plausible-looking
+    /// photo files that carry little or no EXIF, so collecting them would add
+    /// rows with nothing to report.
+    #[test]
+    fn is_photo_extension_rejects_non_photos() {
+        for ext in [
+            "png", "PNG", "gif", "bmp", "tiff", "tif", "heic", "mp4", "mov", "txt", "pdf", "",
+            "jpg2", "ar", "arww", "raw",
+        ] {
+            assert!(
+                !is_photo_extension(ext),
+                "{ext:?} is not a photo this app can read"
+            );
+        }
+    }
+
+    /// Every RAW extension in `PHOTO_EXTENSIONS` must be routed to the RAW
+    /// extractor, and every JPEG one must not. These are two separate lists in
+    /// two separate functions, so the pair is worth asserting together.
+    #[test]
+    fn raw_extensions_route_to_the_raw_extractor() {
+        for ext in [
+            "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf", "pef", "srw", "dng",
+        ] {
+            assert!(is_raw_extension(ext), "{ext:?} is a RAW format");
+        }
+        for ext in ["jpg", "jpeg"] {
+            assert!(
+                !is_raw_extension(ext),
+                "{ext:?} is JPEG and must use the JPEG extractor"
+            );
+        }
     }
 
     #[test]
