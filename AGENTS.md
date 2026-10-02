@@ -14,18 +14,44 @@ Cross-platform desktop app for analyzing EXIF data from photos (JPEG + RAW) with
 
 ## Architecture
 
+The crate is split in two halves: `lib.rs` is the library (no UI, unit tested),
+and the binary modules hold all GUI code.
+
 ```
 src/
-├── main.rs          # App entry point, UI, event loop
+├── main.rs          # Entry point only: `mod` declarations + main()
 ├── lib.rs           # Core logic (public API, tests)
-│   ├── PhotoMeta    # Photo metadata struct
-│   ├── Stats        # Aggregated statistics
-│   ├── extract_exif()        # JPEG EXIF extraction
-│   ├── extract_raw_exif()    # RAW EXIF extraction
-│   ├── scan_directory()      # Parallel folder scanning
-│   └── export_csv()          # CSV export
-└── logging.rs       # Tracing setup + helper macros
+│   ├── PhotoMeta              # Photo metadata struct
+│   ├── Stats                  # Aggregated statistics
+│   ├── extract_exif()         # JPEG EXIF extraction
+│   ├── extract_raw_exif()     # RAW EXIF extraction
+│   ├── scan_directory()       # Parallel folder scanning
+│   └── export_csv()           # CSV export
+├── logging.rs       # Tracing setup + log helpers
+│
+├── app.rs           # CameraStatsApp state + eframe::App update loop
+├── config.rs        # DisplayConfig, PhotoTableColumns (user preferences)
+├── table.rs         # SortColumn/SortOrder/TableState + sort_photos()
+├── filter.rs        # Filter predicate, option lists, dropdown widget
+├── analytics.rs     # Photos -> chart data (pure functions)
+└── ui/              # All egui drawing code
+    ├── mod.rs
+    ├── toolbar.rs      # Folder select, export, settings, status
+    ├── charts.rs       # ISO / aperture / focal charts
+    ├── photo_table.rs  # Sortable, filterable photo grid
+    └── settings.rs     # Display settings window
 ```
+
+### Module rules
+- `app.rs` holds **state**; `ui/` holds **drawing**. A view function takes
+  `&mut CameraStatsApp` (or narrower fields) and draws — it never owns state.
+- `filter.rs`, `analytics.rs`, and `table.rs` are **pure**: no `egui`, no I/O.
+  That is what makes them directly unit testable.
+- `ui/settings.rs` declares its 139 column checkboxes as data via the
+  `column_group!` macro, naming each `PhotoTableColumns` field as a literal
+  identifier. A test asserts the declared groups cover every struct field, so a
+  new field cannot be added without either a checkbox or a test failure.
+- Do not reintroduce a 1000-line `main.rs`; add a module instead.
 
 ## Development Workflow
 
@@ -50,11 +76,21 @@ cargo test -- --nocapture
 cargo test test_stats_from_photos
 ```
 
+Tests live next to the code they cover (`#[cfg(test)] mod tests` in each module).
+Pure modules (`filter`, `table`, `analytics`) are fully covered without fixtures.
+
+**RAW/scan tests need real fixtures in `test_files/raw/` and `test_files/jpeg/`,
+which are gitignored because they are actual camera captures.** Without them those
+tests print `skipping: test_files/ fixtures not present` and pass vacuously — a
+green run does **not** mean the RAW path was exercised. The `fixtures_dir()`
+helper checks for files, not just the directory, so an empty dir also skips.
+
 ### Logging
 - Logs to `~/Library/Application Support/camera_stats/logs/` (macOS)
 - Logs to `~/.local/share/camera_stats/logs/` (Linux)
 - Daily rotating files: `camera_stats.log.YYYY-MM-DD`
-- Control verbosity: `RUST_LOG=debug cargo run`
+- Nothing is logged unless `RUST_LOG` is set — there is no console to attach to.
+  Use `make run-debug` (presets `RUST_LOG`) rather than `cargo run`.
 - Targets: `scan`, `exif`, `ui`
 
 ### Code Style
@@ -83,23 +119,38 @@ The `build.sh` script auto-installs Linux deps.
 2. Update `extract_exif`/`extract_raw_exif`
 3. Add counter to `Stats` struct
 4. Update `Stats::from_photos`
-5. Add chart/table in `main.rs` UI
+5. Add the aggregation function to `analytics.rs`
+6. Draw it from `ui/charts.rs`
+
+### New Photo Table Column
+1. Add `show_*` field to `PhotoTableColumns` (`config.rs`) with a `Default`
+2. Add one `column_group!` entry in `ui/settings.rs` — the test will fail if
+   you skip this
+3. Add one `Column` entry to `COLUMNS` in `ui/photo_table.rs`, giving it a
+   `visible`, `value`, and optionally `filter` + `filter_slot`
 
 ### New Export Format
 1. Add function in `lib.rs` (e.g., `export_json`)
-2. Add button in toolbar (`main.rs`)
+2. Add button in `ui/toolbar.rs`
 3. Add file dialog with appropriate filter
 
 ### New RAW Format
 1. Check `rawler` supports it (uses libraw)
-2. Add extension to `scan_directory` extensions list
-3. Test with real files
+2. Add extension to `scan_directory` extensions list (both the `extensions`
+   array and the `is_raw` match — both must be updated or files are scanned
+   but treated as JPEG)
+3. Test with real files, and confirm the count in the scan log matches
 
 ## Error Handling
 - All fallible operations return `anyhow::Result<T>`
 - Log errors with context: `error!("Failed to process {:?}: {}", path, err)`
 - UI shows user-friendly status messages, not raw errors
 - Failed EXIF extraction skips file (logs warning, continues)
+- **A file that yields no usable data must return `Err`, not a half-filled
+  `PhotoMeta`.** A row with no ISO, no lens, and `0x0` dimensions is worse than
+  a dropped file: it inflates the count and skews every chart. `extract_exif`
+  fails when there is no EXIF block; `extract_raw_exif` fails when there are
+  neither sensor dimensions nor readable EXIF.
 
 ## Performance
 - Scanning runs on background thread (channel + `thread::spawn`)
@@ -116,6 +167,27 @@ warn!(target: "exif", "Failed {:?}: {}", path, err);
 // Use helpers from logging.rs
 log_scan_start(&dir, files.len());
 log_exif_extract(path, success, err.as_ref());
+log_filter_result(shown, total, filters);
+log_stats_summary(iso_n, ap_n, fl_n, cam_n, lens_n);
+```
+
+Targets: `scan` (folder walking + summary), `exif` (per-file extraction),
+`ui` (user interactions, filter changes, truncation).
+
+### Debugging a wrong photo count
+The log answers this directly. `scan_directory` emits a summary on every run:
+```
+Dropped 2 of 24 files (raw: 1, jpeg: 1). Per-file reasons are logged above.
+Scan result: 22 photos kept, 2 dropped
+```
+Per-file `warn!` lines with `RUST_LOG=exif=debug` give the reason. If the counts
+match but a table is empty, the cause is filtering, not scanning — `ui` target
+logs every filter change with the row count it produced.
+
+Set `RUST_LOG` before running, otherwise nothing is written:
+```bash
+make run-debug        # presets RUST_LOG for scan/exif/ui
+make run-exif-log     # per-file extraction detail only
 ```
 
 ## Dependencies
